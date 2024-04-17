@@ -19,6 +19,7 @@
 #include "object-store-ll.h"
 #include "object.h"
 #include "path.h"
+#include "string.h"
 #include "tag.h"
 #include "submodule.h"
 #include "worktree.h"
@@ -29,6 +30,7 @@
 #include "date.h"
 #include "commit.h"
 #include "wildmatch.h"
+#include "wrapper.h"
 
 /*
  * List of all available backends
@@ -979,7 +981,7 @@ int refs_delete_ref(struct ref_store *refs, const char *msg,
 	transaction = ref_store_transaction_begin(refs, &err);
 	if (!transaction ||
 	    ref_transaction_delete(transaction, refname, old_oid,
-				   flags, msg, &err) ||
+				   flags, NULL, msg, &err) ||
 	    ref_transaction_commit(transaction, &err)) {
 		error("%s", err.buf);
 		ref_transaction_free(transaction);
@@ -1217,6 +1219,8 @@ void ref_transaction_free(struct ref_transaction *transaction)
 
 	for (i = 0; i < transaction->nr; i++) {
 		free(transaction->updates[i]->msg);
+		free((void *)transaction->updates[i]->old_ref);
+		free((void *)transaction->updates[i]->new_ref);
 		free(transaction->updates[i]);
 	}
 	free(transaction->updates);
@@ -1228,6 +1232,7 @@ struct ref_update *ref_transaction_add_update(
 		const char *refname, unsigned int flags,
 		const struct object_id *new_oid,
 		const struct object_id *old_oid,
+		const char *new_ref, const char *old_ref,
 		const char *msg)
 {
 	struct ref_update *update;
@@ -1241,10 +1246,15 @@ struct ref_update *ref_transaction_add_update(
 
 	update->flags = flags;
 
-	if (flags & REF_HAVE_NEW)
+	if (old_ref)
+		update->old_ref = xstrdup(old_ref);
+	if (new_ref)
+		update->new_ref = xstrdup(new_ref);
+	if (new_oid && flags & REF_HAVE_NEW)
 		oidcpy(&update->new_oid, new_oid);
-	if (flags & REF_HAVE_OLD)
+	if (old_oid && flags & REF_HAVE_OLD)
 		oidcpy(&update->old_oid, old_oid);
+
 	update->msg = normalize_reflog_message(msg);
 	return update;
 }
@@ -1253,6 +1263,7 @@ int ref_transaction_update(struct ref_transaction *transaction,
 			   const char *refname,
 			   const struct object_id *new_oid,
 			   const struct object_id *old_oid,
+			   const char *new_ref, const char *old_ref,
 			   unsigned int flags, const char *msg,
 			   struct strbuf *err)
 {
@@ -1278,49 +1289,64 @@ int ref_transaction_update(struct ref_transaction *transaction,
 	flags &= REF_TRANSACTION_UPDATE_ALLOWED_FLAGS;
 
 	flags |= (new_oid ? REF_HAVE_NEW : 0) | (old_oid ? REF_HAVE_OLD : 0);
+	flags |= (new_ref ? REF_HAVE_NEW : 0) | (old_ref ? REF_HAVE_OLD : 0);
 
 	ref_transaction_add_update(transaction, refname, flags,
-				   new_oid, old_oid, msg);
+				   new_oid, old_oid, new_ref, old_ref, msg);
 	return 0;
 }
 
 int ref_transaction_create(struct ref_transaction *transaction,
 			   const char *refname,
 			   const struct object_id *new_oid,
+			   const char *new_ref,
 			   unsigned int flags, const char *msg,
 			   struct strbuf *err)
 {
-	if (!new_oid || is_null_oid(new_oid)) {
+	if ((flags & REF_SYMREF_UPDATE) && !new_ref) {
+		strbuf_addf(err, "'%s' has a no new ref", refname);
+		return 1;
+	}
+	if (!(flags & REF_SYMREF_UPDATE) && (!new_oid || is_null_oid(new_oid))) {
 		strbuf_addf(err, "'%s' has a null OID", refname);
 		return 1;
 	}
 	return ref_transaction_update(transaction, refname, new_oid,
-				      null_oid(), flags, msg, err);
+				      null_oid(), new_ref, NULL, flags,
+				      msg, err);
 }
 
 int ref_transaction_delete(struct ref_transaction *transaction,
 			   const char *refname,
 			   const struct object_id *old_oid,
-			   unsigned int flags, const char *msg,
+			   unsigned int flags,
+			   const char *old_ref,
+			   const char *msg,
 			   struct strbuf *err)
 {
-	if (old_oid && is_null_oid(old_oid))
+	if (!(flags & REF_SYMREF_UPDATE) && old_oid &&
+	    is_null_oid(old_oid))
 		BUG("delete called with old_oid set to zeros");
 	return ref_transaction_update(transaction, refname,
 				      null_oid(), old_oid,
-				      flags, msg, err);
+				      NULL, old_ref, flags,
+				      msg, err);
 }
 
 int ref_transaction_verify(struct ref_transaction *transaction,
 			   const char *refname,
 			   const struct object_id *old_oid,
+			   const char *old_ref,
 			   unsigned int flags,
 			   struct strbuf *err)
 {
-	if (!old_oid)
+	if (flags & REF_SYMREF_UPDATE && !old_ref && !old_oid)
+		BUG("verify called with old_ref set to NULL");
+	if (!(flags & REF_SYMREF_UPDATE) && !old_oid)
 		BUG("verify called with old_oid set to NULL");
 	return ref_transaction_update(transaction, refname,
 				      NULL, old_oid,
+				      NULL, old_ref,
 				      flags, NULL, err);
 }
 
@@ -1335,8 +1361,8 @@ int refs_update_ref(struct ref_store *refs, const char *msg,
 
 	t = ref_store_transaction_begin(refs, &err);
 	if (!t ||
-	    ref_transaction_update(t, refname, new_oid, old_oid, flags, msg,
-				   &err) ||
+	    ref_transaction_update(t, refname, new_oid, old_oid, NULL, NULL,
+				   flags, msg, &err) ||
 	    ref_transaction_commit(t, &err)) {
 		ret = 1;
 		ref_transaction_free(t);
@@ -2336,12 +2362,20 @@ static int run_transaction_hook(struct ref_transaction *transaction,
 
 	for (i = 0; i < transaction->nr; i++) {
 		struct ref_update *update = transaction->updates[i];
+		const char *new_value, *old_value;
+
+		new_value = oid_to_hex(&update->new_oid);
+		old_value = oid_to_hex(&update->old_oid);
+
+		if (update->flags & REF_SYMREF_UPDATE) {
+			if (update->flags & REF_HAVE_NEW && !null_new_value(update))
+				new_value = update->new_ref;
+			if (update->flags & REF_HAVE_OLD && update->old_ref)
+				old_value = update->old_ref;
+		}
 
 		strbuf_reset(&buf);
-		strbuf_addf(&buf, "%s %s %s\n",
-			    oid_to_hex(&update->old_oid),
-			    oid_to_hex(&update->new_oid),
-			    update->refname);
+		strbuf_addf(&buf, "%s %s %s\n", old_value, new_value, update->refname);
 
 		if (write_in_full(proc.in, buf.buf, buf.len) < 0) {
 			if (errno != EPIPE) {
@@ -2724,7 +2758,7 @@ int refs_delete_refs(struct ref_store *refs, const char *logmsg,
 
 	for_each_string_list_item(item, refnames) {
 		ret = ref_transaction_delete(transaction, item->string,
-					     NULL, flags, msg, &err);
+					     NULL, flags, NULL, msg, &err);
 		if (ret) {
 			warning(_("could not delete reference %s: %s"),
 				item->string, err.buf);
@@ -2789,4 +2823,10 @@ int refs_copy_existing_ref(struct ref_store *refs, const char *oldref,
 int copy_existing_ref(const char *oldref, const char *newref, const char *logmsg)
 {
 	return refs_copy_existing_ref(get_main_ref_store(the_repository), oldref, newref, logmsg);
+}
+
+int null_new_value(struct ref_update *update) {
+	if (update->flags & REF_SYMREF_UPDATE && update->new_ref)
+		return 0;
+	return is_null_oid(&update->new_oid);
 }

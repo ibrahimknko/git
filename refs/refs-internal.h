@@ -125,6 +125,19 @@ struct ref_update {
 	struct object_id old_oid;
 
 	/*
+	 * If (flags & REF_SYMREF_UPDATE), set the reference to this
+	 * value (or delete it, if `new_ref` is an empty string).
+	 */
+	const char *new_ref;
+
+	/*
+	 * If (type & REF_SYMREF_UPDATE), check that the reference
+	 * previously had this value (or didn't previously exist,
+	 * if `old_ref` is an empty string).
+	 */
+	const char *old_ref;
+
+	/*
 	 * One or more of REF_NO_DEREF, REF_FORCE_CREATE_REFLOG,
 	 * REF_HAVE_NEW, REF_HAVE_OLD, or backend-specific flags.
 	 */
@@ -173,6 +186,7 @@ struct ref_update *ref_transaction_add_update(
 		const char *refname, unsigned int flags,
 		const struct object_id *new_oid,
 		const struct object_id *old_oid,
+		const char *new_ref, const char *old_ref,
 		const char *msg);
 
 /*
@@ -734,5 +748,12 @@ void base_ref_store_init(struct ref_store *refs, struct repository *repo,
  * Support GIT_TRACE_REFS by optionally wrapping the given ref_store instance.
  */
 struct ref_store *maybe_debug_wrap_ref_store(const char *gitdir, struct ref_store *store);
+
+/*
+ * Helper function to check if the new value is null, this
+ * takes into consideration that the update could be a regular
+ * ref or a symbolic ref.
+ */
+int null_new_value(struct ref_update *update);
 
 #endif /* REFS_REFS_INTERNAL_H */

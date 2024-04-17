@@ -697,12 +697,18 @@ struct ref_transaction *ref_transaction_begin(struct strbuf *err);
 #define REF_SKIP_REFNAME_VERIFICATION (1 << 11)
 
 /*
+ * The reference update is considered to be done on a symbolic reference. This
+ * ensures that we verify, delete, create and update the ref correspondingly.
+ */
+#define REF_SYMREF_UPDATE (1 << 12)
+
+/*
  * Bitmask of all of the flags that are allowed to be passed in to
  * ref_transaction_update() and friends:
  */
 #define REF_TRANSACTION_UPDATE_ALLOWED_FLAGS                                  \
 	(REF_NO_DEREF | REF_FORCE_CREATE_REFLOG | REF_SKIP_OID_VERIFICATION | \
-	 REF_SKIP_REFNAME_VERIFICATION)
+	 REF_SKIP_REFNAME_VERIFICATION | REF_SYMREF_UPDATE )
 
 /*
  * Add a reference update to transaction. `new_oid` is the value that
@@ -722,6 +728,7 @@ int ref_transaction_update(struct ref_transaction *transaction,
 			   const char *refname,
 			   const struct object_id *new_oid,
 			   const struct object_id *old_oid,
+			   const char *new_ref, const char *old_ref,
 			   unsigned int flags, const char *msg,
 			   struct strbuf *err);
 
@@ -737,6 +744,7 @@ int ref_transaction_update(struct ref_transaction *transaction,
 int ref_transaction_create(struct ref_transaction *transaction,
 			   const char *refname,
 			   const struct object_id *new_oid,
+			   const char *new_ref,
 			   unsigned int flags, const char *msg,
 			   struct strbuf *err);
 
@@ -751,7 +759,9 @@ int ref_transaction_create(struct ref_transaction *transaction,
 int ref_transaction_delete(struct ref_transaction *transaction,
 			   const char *refname,
 			   const struct object_id *old_oid,
-			   unsigned int flags, const char *msg,
+			   unsigned int flags,
+			   const char *old_ref,
+			   const char *msg,
 			   struct strbuf *err);
 
 /*
@@ -765,6 +775,7 @@ int ref_transaction_delete(struct ref_transaction *transaction,
 int ref_transaction_verify(struct ref_transaction *transaction,
 			   const char *refname,
 			   const struct object_id *old_oid,
+			   const char *old_ref,
 			   unsigned int flags,
 			   struct strbuf *err);
 

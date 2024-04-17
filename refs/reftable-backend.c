@@ -827,7 +827,7 @@ static int reftable_be_transaction_prepare(struct ref_store *ref_store,
 			new_update = ref_transaction_add_update(
 					transaction, "HEAD",
 					u->flags | REF_LOG_ONLY | REF_NO_DEREF,
-					&u->new_oid, &u->old_oid, u->msg);
+					&u->new_oid, &u->old_oid, NULL, NULL, u->msg);
 			string_list_insert(&affected_refnames, new_update->refname);
 		}
 
@@ -854,7 +854,7 @@ static int reftable_be_transaction_prepare(struct ref_store *ref_store,
 			 * There is no need to write the reference deletion
 			 * when the reference in question doesn't exist.
 			 */
-			 if (u->flags & REF_HAVE_NEW && !is_null_oid(&u->new_oid)) {
+			 if (u->flags & REF_HAVE_NEW && !null_new_value(u)) {
 				 ret = queue_transaction_update(refs, tx_data, u,
 								&current_oid, err);
 				 if (ret)
@@ -906,7 +906,7 @@ static int reftable_be_transaction_prepare(struct ref_store *ref_store,
 				 */
 				new_update = ref_transaction_add_update(
 						transaction, referent.buf, new_flags,
-						&u->new_oid, &u->old_oid, u->msg);
+						&u->new_oid, &u->old_oid, u->new_ref, u->old_ref, u->msg);
 				new_update->parent_update = u;
 
 				/*
@@ -936,7 +936,28 @@ static int reftable_be_transaction_prepare(struct ref_store *ref_store,
 		 * individual refs. But the error messages match what the files
 		 * backend returns, which keeps our tests happy.
 		 */
-		if (u->flags & REF_HAVE_OLD && !oideq(&current_oid, &u->old_oid)) {
+		if ((u->flags & REF_HAVE_OLD) &&
+		    (u->flags & REF_SYMREF_UPDATE) &&
+		    u->old_ref) {
+			if   (strcmp(referent.buf, u->old_ref)) {
+				if (!strcmp(u->old_ref, ""))
+					strbuf_addf(err, "cannot lock ref '%s': "
+						    "reference already exists",
+						    original_update_refname(u));
+				else if (!strcmp(referent.buf, ""))
+					strbuf_addf(err, "cannot lock ref '%s': "
+						    "reference is missing but expected %s",
+						    original_update_refname(u),
+						    u->old_ref);
+				else
+					strbuf_addf(err, "cannot lock ref '%s': "
+						    "is at %s but expected %s",
+						    original_update_refname(u),
+						    referent.buf, u->old_ref);
+				ret = -1;
+				goto done;
+			}
+		} else if (u->flags & REF_HAVE_OLD && !oideq(&current_oid, &u->old_oid)) {
 			if (is_null_oid(&u->old_oid))
 				strbuf_addf(err, _("cannot lock ref '%s': "
 					    "reference already exists"),
@@ -1047,7 +1068,7 @@ static int write_transaction_table(struct reftable_writer *writer, void *cb_data
 		 * - `core.logAllRefUpdates` tells us to create the reflog for
 		 *   the given ref.
 		 */
-		if (u->flags & REF_HAVE_NEW && !(u->type & REF_ISSYMREF) && is_null_oid(&u->new_oid)) {
+		if (u->flags & REF_HAVE_NEW && !(u->type & REF_ISSYMREF) && null_new_value(u)) {
 			struct reftable_log_record log = {0};
 			struct reftable_iterator it = {0};
 
@@ -1089,6 +1110,11 @@ static int write_transaction_table(struct reftable_writer *writer, void *cb_data
 			    should_write_log(&arg->refs->base, u->refname))) {
 			struct reftable_log_record *log;
 
+			if (u->flags & REF_SYMREF_UPDATE && u->new_ref)
+				if (!refs_resolve_ref_unsafe(&arg->refs->base, u->new_ref,
+				     RESOLVE_REF_READING, &u->new_oid, NULL))
+					goto done;
+
 			ALLOC_GROW(logs, logs_nr + 1, logs_alloc);
 			log = &logs[logs_nr++];
 			memset(log, 0, sizeof(*log));
@@ -1105,7 +1131,20 @@ static int write_transaction_table(struct reftable_writer *writer, void *cb_data
 		if (u->flags & REF_LOG_ONLY)
 			continue;
 
-		if (u->flags & REF_HAVE_NEW && is_null_oid(&u->new_oid)) {
+		if (u->flags & REF_SYMREF_UPDATE &&
+		    u->flags & REF_HAVE_NEW &&
+		    !null_new_value(u)) {
+			struct reftable_ref_record ref = {
+				.refname = (char *)u->refname,
+				.value_type = REFTABLE_REF_SYMREF,
+				.value.symref = (char *)u->new_ref,
+				.update_index = ts,
+			};
+
+			ret = reftable_writer_add_ref(writer, &ref);
+			if (ret < 0)
+				goto done;
+		} else if (u->flags & REF_HAVE_NEW && null_new_value(u)) {
 			struct reftable_ref_record ref = {
 				.refname = (char *)u->refname,
 				.update_index = ts,

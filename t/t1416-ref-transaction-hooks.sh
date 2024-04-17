@@ -108,6 +108,10 @@ test_expect_success 'hook gets all queued updates in aborted state' '
 	test_cmp expect actual
 '
 
+# This test doesn't add a check for 'symref-delete' since there is a
+# variation between the ref backends WRT 'delete'. In the files backend,
+# 'delete' also triggers an additional transaction update on the
+# packed-refs backend, which constitutes additional reflog entries.
 test_expect_success 'interleaving hook calls succeed' '
 	test_when_finished "rm -r target-repo.git" &&
 
@@ -132,6 +136,43 @@ test_expect_success 'interleaving hook calls succeed' '
 
 	git push ./target-repo.git PRE POST &&
 	test_cmp expect target-repo.git/actual
+'
+
+test_expect_success 'hook gets all queued symref updates' '
+	test_when_finished "rm actual" &&
+
+	git update-ref refs/heads/branch $POST_OID &&
+	git symbolic-ref refs/heads/symref refs/heads/main &&
+	git symbolic-ref refs/heads/symrefu refs/heads/main &&
+
+	test_hook reference-transaction <<-\EOF &&
+		echo "$*" >>actual
+		while read -r line
+		do
+			printf "%s\n" "$line"
+		done >>actual
+	EOF
+
+	cat >expect <<-EOF &&
+		prepared
+		refs/heads/main $ZERO_OID refs/heads/symref
+		$ZERO_OID refs/heads/main refs/heads/symrefc
+		refs/heads/main refs/heads/branch refs/heads/symrefu
+		committed
+		refs/heads/main $ZERO_OID refs/heads/symref
+		$ZERO_OID refs/heads/main refs/heads/symrefc
+		refs/heads/main refs/heads/branch refs/heads/symrefu
+	EOF
+
+	git update-ref --no-deref --stdin <<-EOF &&
+		start
+		symref-verify refs/heads/symref refs/heads/main
+		symref-create refs/heads/symrefc refs/heads/main
+		symref-update refs/heads/symrefu refs/heads/branch refs/heads/main
+		prepare
+		commit
+	EOF
+	test_cmp expect actual
 '
 
 test_done

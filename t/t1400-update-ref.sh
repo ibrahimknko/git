@@ -890,17 +890,23 @@ test_expect_success 'stdin update/create/verify combination works' '
 '
 
 test_expect_success 'stdin verify succeeds for correct value' '
+	test-tool ref-store main for-each-reflog-ent $m >before &&
 	git rev-parse $m >expect &&
 	echo "verify $m $m" >stdin &&
 	git update-ref --stdin <stdin &&
 	git rev-parse $m >actual &&
-	test_cmp expect actual
+	test_cmp expect actual &&
+	test-tool ref-store main for-each-reflog-ent $m >after &&
+	test_cmp before after
 '
 
 test_expect_success 'stdin verify succeeds for missing reference' '
+	test-tool ref-store main for-each-reflog-ent $m >before &&
 	echo "verify refs/heads/missing $Z" >stdin &&
 	git update-ref --stdin <stdin &&
-	test_must_fail git rev-parse --verify -q refs/heads/missing
+	test_must_fail git rev-parse --verify -q refs/heads/missing &&
+	test-tool ref-store main for-each-reflog-ent $m >after &&
+	test_cmp before after
 '
 
 test_expect_success 'stdin verify treats no value as missing' '
@@ -1354,6 +1360,7 @@ test_expect_success 'fails with duplicate HEAD update' '
 '
 
 test_expect_success 'fails with duplicate ref update via symref' '
+	test_when_finished "git symbolic-ref -d refs/heads/symref2" &&
 	git branch target2 $A &&
 	git symbolic-ref refs/heads/symref2 refs/heads/target2 &&
 	cat >stdin <<-EOF &&
@@ -1640,5 +1647,314 @@ test_expect_success PIPE 'transaction flushes status updates' '
 	echo "$line" >actual &&
 	test_cmp expected actual
 '
+
+create_stdin_buf ()
+{
+	if test "$1" = "-z"
+	then
+		shift
+		printf "$F" "$@" >stdin
+	else
+		echo "$@" >stdin
+	fi
+}
+
+for type in "" "-z"
+do
+
+test_expect_success "stdin ${type} symref-verify fails without --no-deref" '
+	git symbolic-ref refs/heads/symref $a &&
+	create_stdin_buf ${type} "symref-verify refs/heads/symref" "$a" &&
+	test_must_fail git update-ref --stdin ${type} <stdin 2>err &&
+	grep "fatal: symref-verify: cannot operate with deref mode" err
+'
+
+test_expect_success "stdin ${type} symref-verify fails with too many arguments" '
+	create_stdin_buf ${type} "symref-verify refs/heads/symref" "$a" "$a" &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin 2>err  &&
+	if test "$type" = "-z"
+	then
+		grep "fatal: unknown command: $a" err
+	else
+		grep "fatal: symref-verify refs/heads/symref: extra input:  $a" err
+	fi
+'
+
+test_expect_success "stdin ${type} symref-verify succeeds for correct value" '
+	git symbolic-ref refs/heads/symref >expect &&
+	test-tool ref-store main for-each-reflog-ent refs/heads/symref >before &&
+	create_stdin_buf ${type} "symref-verify refs/heads/symref" "$a" &&
+	git update-ref --stdin ${type} --no-deref <stdin &&
+	git symbolic-ref refs/heads/symref >actual &&
+	test_cmp expect actual &&
+	test-tool ref-store main for-each-reflog-ent refs/heads/symref >after &&
+	test_cmp before after
+'
+
+test_expect_success "stdin ${type} symref-verify succeeds for missing reference" '
+	test-tool ref-store main for-each-reflog-ent refs/heads/symref >before &&
+	create_stdin_buf ${type} "symref-verify refs/heads/missing" &&
+	git update-ref --stdin ${type} --no-deref <stdin &&
+	test_must_fail git rev-parse --verify -q refs/heads/missing &&
+	test-tool ref-store main for-each-reflog-ent refs/heads/symref >after &&
+	test_cmp before after
+'
+
+test_expect_success "stdin ${type} symref-verify fails for wrong value" '
+	git symbolic-ref refs/heads/symref >expect &&
+	create_stdin_buf ${type} "symref-verify refs/heads/symref" "$b" &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin &&
+	git symbolic-ref refs/heads/symref >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success "stdin ${type} symref-verify fails for mistaken null value" '
+	git symbolic-ref refs/heads/symref >expect &&
+	create_stdin_buf ${type} "symref-verify refs/heads/symref" &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin &&
+	git symbolic-ref refs/heads/symref >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success "stdin ${type} symref-delete fails without --no-deref" '
+	git symbolic-ref refs/heads/symref $a &&
+	create_stdin_buf ${type} "symref-delete refs/heads/symref" "$a" &&
+	test_must_fail git update-ref --stdin ${type} <stdin 2>err &&
+	grep "fatal: symref-delete: cannot operate with deref mode" err
+'
+
+test_expect_success "stdin ${type} fails symref-delete with no ref" '
+	create_stdin_buf ${type} "symref-delete " &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin 2>err &&
+	grep "fatal: symref-delete: missing <ref>" err
+'
+
+test_expect_success "stdin ${type} fails symref-delete with too many arguments" '
+	create_stdin_buf ${type} "symref-delete refs/heads/symref" "$a" "$a" &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin 2>err &&
+	if test "$type" = "-z"
+	then
+		grep "fatal: unknown command: $a" err
+	else
+		grep "fatal: symref-delete refs/heads/symref: extra input:  $a" err
+	fi
+'
+
+test_expect_success "stdin ${type} symref-delete ref fails with wrong old value" '
+	create_stdin_buf ${type} "symref-delete refs/heads/symref" "$m" &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin 2>err &&
+	grep "fatal: cannot lock ref '"'"'refs/heads/symref'"'"'" err &&
+	git symbolic-ref refs/heads/symref >expect &&
+	echo $a >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success "stdin ${type} symref-delete ref works with right old value" '
+	create_stdin_buf ${type} "symref-delete refs/heads/symref" "$a" &&
+	git update-ref --stdin ${type} --no-deref <stdin &&
+	test_must_fail git rev-parse --verify -q $b
+'
+
+test_expect_success "stdin ${type} symref-create fails without --no-deref" '
+	create_stdin_buf ${type} "symref-create refs/heads/symref" "$a" &&
+	test_must_fail git update-ref --stdin ${type} <stdin 2>err &&
+	grep "fatal: symref-create: cannot operate with deref mode" err
+'
+
+test_expect_success "stdin ${type} fails symref-create with no ref" '
+	create_stdin_buf ${type} "symref-create " >stdin &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin 2>err &&
+	grep "fatal: symref-create: missing <ref>" err
+'
+
+test_expect_success "stdin ${type} fails symref-create with no new value" '
+	create_stdin_buf ${type} "symref-create refs/heads/symref" >stdin &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin 2>err &&
+	grep "fatal: symref-create refs/heads/symref: missing <new-ref>" err
+'
+
+test_expect_success "stdin ${type} fails symref-create with too many arguments" '
+	create_stdin_buf ${type} "symref-create refs/heads/symref" "$a" "$a" >stdin &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin 2>err &&
+	if test "$type" = "-z"
+	then
+		grep "fatal: unknown command: $a" err
+	else
+		grep "fatal: symref-create refs/heads/symref: extra input:  $a" err
+	fi
+'
+
+test_expect_success "stdin ${type} symref-create ref works" '
+	test_when_finished "git symbolic-ref -d refs/heads/symref" &&
+	create_stdin_buf ${type} "symref-create refs/heads/symref" "$a" >stdin &&
+	git update-ref --stdin ${type} --no-deref <stdin &&
+	git symbolic-ref refs/heads/symref >expect &&
+	echo $a >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success "stdin ${type} symref-create does not create reflogs by default" '
+	test_when_finished "git symbolic-ref -d refs/symref" &&
+	create_stdin_buf ${type} "symref-create refs/symref" "$a" >stdin &&
+	git update-ref --stdin ${type} --no-deref <stdin &&
+	git symbolic-ref refs/symref >expect &&
+	echo $a >actual &&
+	test_cmp expect actual &&
+	test_must_fail git reflog exists refs/symref
+'
+
+test_expect_success "stdin ${type} symref-create reflogs with --create-reflog" '
+	test_when_finished "git symbolic-ref -d refs/heads/symref" &&
+	create_stdin_buf ${type} "symref-create refs/heads/symref" "$a" >stdin &&
+	git update-ref --create-reflog --stdin ${type} --no-deref <stdin &&
+	git symbolic-ref refs/heads/symref >expect &&
+	echo $a >actual &&
+	test_cmp expect actual &&
+	git reflog exists refs/heads/symref
+'
+
+test_expect_success "stdin ${type} fails symref-update with no ref" '
+	create_stdin_buf ${type} "symref-update " >stdin &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin 2>err &&
+	grep "fatal: symref-update: missing <ref>" err
+'
+
+test_expect_success "stdin ${type} fails symref-update with no new value" '
+	create_stdin_buf ${type} "symref-update refs/heads/symref" >stdin &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin 2>err &&
+	grep "fatal: symref-update refs/heads/symref: missing <new-ref>" err
+'
+
+test_expect_success "stdin ${type} fails symref-update with too many arguments" '
+	create_stdin_buf ${type} "symref-update refs/heads/symref" "$a" "$a" "$a" >stdin &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin 2>err &&
+	if test "$type" = "-z"
+	then
+		grep "fatal: unknown command: $a" err
+	else
+		grep "fatal: symref-update refs/heads/symref: extra input:  $a" err
+	fi
+'
+
+test_expect_success "stdin ${type} symref-update ref creates with zero old value" '
+	test_when_finished "git symbolic-ref -d refs/heads/symref" &&
+	create_stdin_buf ${type} "symref-update refs/heads/symref" "$a" "$Z" >stdin &&
+	git update-ref --stdin ${type} --no-deref <stdin &&
+	echo $a >expect &&
+	git symbolic-ref refs/heads/symref >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success "stdin ${type} symref-update ref creates with empty old value" '
+	test_when_finished "git symbolic-ref -d refs/heads/symref" &&
+	create_stdin_buf ${type} "symref-update refs/heads/symref" "$a" >stdin &&
+	git update-ref --stdin ${type} --no-deref <stdin &&
+	echo $a >expect &&
+	git symbolic-ref refs/heads/symref >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success "stdin ${type} symref-update ref fails with wrong old value" '
+	test_when_finished "git symbolic-ref -d refs/heads/symref" &&
+	git symbolic-ref refs/heads/symref $a &&
+	create_stdin_buf ${type} "symref-update refs/heads/symref" "$m" "$b" >stdin &&
+	test_must_fail git update-ref --stdin ${type} --no-deref <stdin 2>err &&
+	grep "fatal: symref-update refs/heads/symref: invalid <old-ref> or <old-oid>" err &&
+	test_must_fail git rev-parse --verify -q $c
+'
+
+test_expect_success "stdin ${type} symref-update ref works with right old value" '
+	test_when_finished "git symbolic-ref -d refs/heads/symref" &&
+	git symbolic-ref refs/heads/symref $a &&
+	create_stdin_buf ${type} "symref-update refs/heads/symref" "$m" "$a" >stdin &&
+	git update-ref --stdin ${type} --no-deref <stdin &&
+	echo $m >expect &&
+	git symbolic-ref refs/heads/symref >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success "stdin ${type} symref-update creates symref (with deref)" '
+	test_when_finished "git symbolic-ref -d refs/heads/symref" &&
+	create_stdin_buf ${type} "symref-update refs/heads/symref" "$a" >stdin &&
+	git update-ref --stdin ${type} <stdin &&
+	echo $a >expect &&
+	git symbolic-ref --no-recurse refs/heads/symref >actual &&
+	test_cmp expect actual &&
+	test-tool ref-store main for-each-reflog-ent refs/heads/symref >actual &&
+	grep "$Z $(git rev-parse $a)" actual
+'
+
+test_expect_success "stdin ${type} symref-update updates symref (with deref)" '
+	test_when_finished "git symbolic-ref -d refs/heads/symref" &&
+	test_when_finished "git update-ref -d --no-deref refs/heads/symref2" &&
+	git update-ref refs/heads/symref2 $a &&
+	git symbolic-ref --no-recurse refs/heads/symref refs/heads/symref2 &&
+	create_stdin_buf ${type} "symref-update refs/heads/symref" "$a" >stdin &&
+	git update-ref --stdin ${type} <stdin &&
+	echo $a >expect &&
+	git symbolic-ref --no-recurse refs/heads/symref2 >actual &&
+	test_cmp expect actual &&
+	echo refs/heads/symref2 >expect &&
+	git symbolic-ref --no-recurse refs/heads/symref >actual &&
+	test_cmp expect actual &&
+	test-tool ref-store main for-each-reflog-ent refs/heads/symref >actual &&
+	grep "$(git rev-parse $a) $(git rev-parse $a)" actual
+'
+
+test_expect_success "stdin ${type} symref-update regular ref" '
+	test_when_finished "git symbolic-ref -d --no-recurse refs/heads/regularref" &&
+	git update-ref --no-deref refs/heads/regularref $a &&
+	create_stdin_buf ${type} "symref-update refs/heads/regularref" "$a" >stdin &&
+	git update-ref --stdin ${type} <stdin &&
+	echo $a >expect &&
+	git symbolic-ref --no-recurse refs/heads/regularref >actual &&
+	test_cmp expect actual &&
+	test-tool ref-store main for-each-reflog-ent refs/heads/regularref >actual &&
+	grep "$(git rev-parse $a) $(git rev-parse $a)" actual
+'
+
+test_expect_success "stdin ${type} symref-update regular ref with correct old-oid" '
+	test_when_finished "git symbolic-ref -d --no-recurse refs/heads/regularref" &&
+	git update-ref --no-deref refs/heads/regularref $a &&
+	create_stdin_buf ${type} "symref-update refs/heads/regularref" "$a" "$(git rev-parse $a)" >stdin &&
+	git update-ref --stdin ${type} <stdin &&
+	echo $a >expect &&
+	git symbolic-ref --no-recurse refs/heads/regularref >actual &&
+	test_cmp expect actual &&
+	test-tool ref-store main for-each-reflog-ent refs/heads/regularref >actual &&
+	grep "$(git rev-parse $a) $(git rev-parse $a)" actual
+'
+
+test_expect_success "stdin ${type} symref-update regular ref fails with wrong old-oid" '
+	test_when_finished "git update-ref -d refs/heads/regularref" &&
+	git update-ref --no-deref refs/heads/regularref $a &&
+	create_stdin_buf ${type} "symref-update refs/heads/regularref" "$a" "$(git rev-parse refs/heads/target2)" >stdin &&
+	test_must_fail git update-ref --stdin ${type} <stdin 2>err &&
+	echo $(git rev-parse $a) >expect &&
+	git rev-parse refs/heads/regularref >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success "stdin ${type} symref-update with zero old-oid" '
+	test_when_finished "git symbolic-ref -d --no-recurse refs/heads/symref" &&
+	create_stdin_buf ${type} "symref-update refs/heads/symref" "$a" "$Z" >stdin &&
+	git update-ref --stdin ${type} <stdin 2>err &&
+	echo $a >expect &&
+	git symbolic-ref refs/heads/symref >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success "stdin ${type} symref-update ref with zero old-oid" '
+	test_when_finished "git symbolic-ref -d --no-recurse refs/heads/symref" &&
+	git symbolic-ref refs/heads/symref refs/heads/target2 &&
+	create_stdin_buf ${type} "symref-update refs/heads/symref" "$a" "$Z" >stdin &&
+	test_must_fail git update-ref --stdin ${type} <stdin 2>err &&
+	grep "fatal: cannot lock ref '"'"'refs/heads/symref'"'"': reference already exists" err &&
+	echo refs/heads/target2 >expect &&
+	git symbolic-ref refs/heads/symref >actual &&
+	test_cmp expect actual
+'
+
+done
 
 test_done
