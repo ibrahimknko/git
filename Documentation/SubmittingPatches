@@ -407,8 +407,8 @@ mailing list{security-ml}, instead of the public mailing list.
 
 :contrib-scripts: footnoteref:[contrib-scripts,Scripts under `contrib/` are +
 not part of the core `git` binary and must be called directly. Clone the Git +
-codebase and run `contrib/contacts/git-contacts` (you must have Perl installed +
-in your system).]
+codebase and run `perl contrib/contacts/git-contacts` (you must have Perl +
+installed in your system).]
 
 Send your patch with "To:" set to the mailing list, with "cc:" listing
 people who are involved in the area you are touching (the `git-contacts`
@@ -422,7 +422,7 @@ If you are using `send-email`, you can feed it the output of `git-contacts` like
 this:
 
 ....
-	git send-email --cc-cmd='contrib/contacts/git-contacts' feature/*.patch
+	git send-email --cc-cmd='perl contrib/contacts/git-contacts' feature/*.patch
 ....
 
 :current-maintainer: footnote:[The current maintainer: gitster@pobox.com]
